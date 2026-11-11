@@ -1,6 +1,6 @@
 # Linkdrop
 
-Next.js frontend and API routes, with a separate Python/yt-dlp worker for video extraction and downloads. The frontend can deploy to Vercel; deploy the Docker worker to a host that supports long requests and FFmpeg (for example a container server).
+Next.js frontend and API routes, with a separate Python/yt-dlp worker for video extraction and downloads. The frontend can deploy to Vercel; the Docker worker needs a container runtime with FFmpeg and sufficient request time and temporary disk. Vercel also offers a [Container Runtime beta](https://vercel.com/docs/functions/runtimes/container), subject to its function limits.
 
 ## Run locally
 
@@ -11,6 +11,26 @@ Next.js frontend and API routes, with a separate Python/yt-dlp worker for video 
 5. Run `npm run dev` and open http://localhost:3000.
 
 ## Deploy
+
+### Vercel website
+
+1. In [Vercel New Project](https://vercel.com/new), import `subasthican/VIDEO_DOWNLOADER_URL` from GitHub.
+2. Keep **Root Directory** at the repository root and **Framework Preset** as **Next.js**. The checked-in `vercel.json` installs with `npm ci` and builds with `npm run build`; leave Output Directory at its default.
+3. Add these server-only environment variables for Production (and Preview if you want working preview deployments):
+
+   | Variable | Value |
+   | --- | --- |
+   | `VIDEO_WORKER_URL` | The deployed Python worker's public HTTPS origin, e.g. `https://your-worker.example.com` |
+   | `VIDEO_WORKER_SECRET` | The same random secret configured on the Python worker; at least 24 characters |
+
+4. Click **Deploy**. If you add or change the variables later, redeploy so the new deployment uses them.
+5. Open the resulting `*.vercel.app` URL and check a public video link, then download one available quality.
+
+The website can deploy before the worker is ready, but analyzing and downloading will not work until both environment variables point to a running worker. Do not use `localhost` for either production worker URL: Vercel and visitors cannot reach the worker on your computer through that address.
+
+The Python worker is a separate deployment using `worker/Dockerfile`; importing the repository into Vercel deploys the Next.js application. Video bytes go directly from the worker to the visitor. `.vercelignore` excludes the local Python environment, generated videos, and local environment files from CLI uploads. Set production secrets in the hosting dashboards.
+
+### Python worker and public traffic
 
 1. Deploy `worker/` using its Dockerfile. Set `VIDEO_WORKER_SECRET` and `WORKER_PUBLIC_URL` (the worker's public HTTPS origin). The download URL must be reachable by visitors. Configure its reverse proxy for downloads that can take up to 10 minutes. Mount enough temporary disk and enforce disk/network quotas.
 2. Import this repository into Vercel. Set `VIDEO_WORKER_URL` to the worker's HTTPS origin and `VIDEO_WORKER_SECRET` to the shared secret. Deploy using the Next.js preset. These are server-only variables; do not prefix them with NEXT_PUBLIC.
