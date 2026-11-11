@@ -1,5 +1,5 @@
-"""Extraction service. Deploy separately from the Vercel Next.js app."""
-import asyncio, base64, hashlib, hmac, json, os, re, shutil, tempfile, time
+"""Extraction service, deployed with the website through Vercel Services."""
+import asyncio, base64, hashlib, hmac, json, logging, os, re, shutil, tempfile, time
 from pathlib import Path
 from urllib.parse import urlparse
 from fastapi import FastAPI, Header, HTTPException
@@ -8,7 +8,10 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 SECRET = os.environ.get('VIDEO_WORKER_SECRET', '')
-PUBLIC = os.environ.get('WORKER_PUBLIC_URL', 'http://localhost:8000').rstrip('/')
+PUBLIC = os.environ.get('WORKER_PUBLIC_URL', '').rstrip('/')
+DOWNLOAD_TIMEOUT = int(os.environ.get('VIDEO_DOWNLOAD_TIMEOUT_SECONDS', '240'))
+if DOWNLOAD_TIMEOUT <= 0:
+    raise RuntimeError('VIDEO_DOWNLOAD_TIMEOUT_SECONDS must be positive')
 if len(SECRET) < 24:
     raise RuntimeError('Set VIDEO_WORKER_SECRET to at least 24 random characters')
 app = FastAPI(docs_url=None, redoc_url=None)
@@ -59,6 +62,10 @@ async def run(args, timeout=45):
         process.kill(); await process.wait()
         raise HTTPException(504,'The source took too long. Try a shorter video or try again later.')
     if process.returncode:
+        detail=err.decode(errors='replace')
+        logging.getLogger('linkdrop.extractor').warning('yt-dlp exited %s: %s', process.returncode, re.sub(r'https?://\S+', '[url]', detail)[-2000:])
+        if ('confirm' in detail.lower() and 'bot' in detail.lower()) or 'HTTP Error 429' in detail:
+            raise HTTPException(422,'The video platform is blocking automated requests from this server. Try another video source.')
         raise HTTPException(422,'This video is unavailable to the downloader. It may be private, restricted, or blocked by the platform.')
     return out
 
@@ -110,13 +117,18 @@ async def file(ticket:str):
     selector='bv*+ba/b' if quality=='original' else f'bv*[height<={int(quality)}]+ba/b[height<={int(quality)}]'
     folder=tempfile.mkdtemp(prefix='linkdrop-')
     try:
-        async with slots:
-            await run(['--max-filesize','500M','--format',selector,'--merge-output-format','mp4','--output',folder+'/video.%(ext)s','--',data['url']],timeout=600)
+        # Include time waiting for a slot, leaving time to send the file within Vercel's request limit.
+        async with asyncio.timeout(DOWNLOAD_TIMEOUT):
+            async with slots:
+                await run(['--max-filesize','500M','--format',selector,'--merge-output-format','mp4','--output',folder+'/video.%(ext)s','--',data['url']],timeout=DOWNLOAD_TIMEOUT)
         files=[p for p in Path(folder).iterdir() if p.suffix in ('.mp4','.webm','.mkv','.mov')]
         if not files: raise HTTPException(422,'The source did not provide a downloadable file within the 500 MB limit.')
         result=files[0]
         if result.stat().st_size>500*1024*1024: raise HTTPException(413,'The video exceeds the 500 MB download limit.')
         return FileResponse(result,filename='video'+result.suffix,background=BackgroundTask(shutil.rmtree,folder),headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
+    except TimeoutError:
+        shutil.rmtree(folder,ignore_errors=True)
+        raise HTTPException(504,'The download service is busy. Try a shorter video or try again later.')
     except BaseException:
         shutil.rmtree(folder,ignore_errors=True);raise
 

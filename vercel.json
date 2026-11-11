@@ -1,6 +1,46 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "nextjs",
-  "installCommand": "npm ci",
-  "buildCommand": "npm run build"
+  "services": {
+    "app": {
+      "root": ".",
+      "framework": "nextjs",
+      "installCommand": "npm ci",
+      "buildCommand": "npm run build",
+      "bindings": [
+        {
+          "type": "service",
+          "service": "worker",
+          "format": "url",
+          "env": "VIDEO_WORKER_INTERNAL_URL"
+        }
+      ]
+    },
+    "worker": {
+      "root": "worker",
+      "runtime": "container",
+      "entrypoint": "Dockerfile"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/file/(.*)",
+      "destination": { "service": "worker" }
+    },
+    {
+      "source": "/preview/(.*)",
+      "destination": { "service": "worker" }
+    },
+    {
+      "source": "/download/pictory-preview.mp4",
+      "destination": { "service": "worker" }
+    },
+    {
+      "source": "/health",
+      "destination": { "service": "worker" }
+    },
+    {
+      "source": "/(.*)",
+      "destination": { "service": "app" }
+    }
+  ]
 }

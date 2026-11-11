@@ -10,34 +10,27 @@ Next.js frontend and API routes, with a separate Python/yt-dlp worker for video 
 4. Start the worker: `uvicorn main:app --app-dir worker --port 8000`.
 5. Run `npm run dev` and open http://localhost:3000.
 
-## Deploy
+## Deploy to Vercel from `./`
 
-### Vercel website
+The root `vercel.json` deploys the website and Docker downloader **together in one Vercel project**, on one domain. Keep the source folders as they are; Vercel builds the Next.js `app` service at the repository root and the Python `worker` service from `worker/Dockerfile`. The worker uses Vercel's [Container Runtime beta](https://vercel.com/docs/functions/runtimes/container).
 
-1. In [Vercel New Project](https://vercel.com/new), import `subasthican/VIDEO_DOWNLOADER_URL` from GitHub.
-2. Keep **Root Directory** at the repository root and **Framework Preset** as **Next.js**. The checked-in `vercel.json` installs with `npm ci` and builds with `npm run build`; leave Output Directory at its default.
-3. Add these server-only environment variables for Production (and Preview if you want working preview deployments):
+1. Commit and push the project, then import `subasthican/VIDEO_DOWNLOADER_URL` in [Vercel](https://vercel.com/new), or redeploy the existing project.
+2. Set **Root Directory** to `./` and use the **Services** application preset. Both `app` and `worker` belong to this single project. Leave dashboard build/install/output overrides unset; each service is configured in `vercel.json`.
+3. Generate a secret with `openssl rand -hex 32` and save it in the project's environment variables as **`VIDEO_WORKER_SECRET`**. Enable it for Production and any Preview environments you use. Keep the value private. It must be at least 24 characters and must stay the same across worker instances.
+4. Deploy or redeploy. Vercel automatically injects `VIDEO_WORKER_INTERNAL_URL` into the website using the service binding. You do **not** need to set `VIDEO_WORKER_URL`, `VIDEO_WORKER_INTERNAL_URL`, or `WORKER_PUBLIC_URL` for this setup; remove old URL overrides if present.
+5. Check `https://your-project.vercel.app/health` for `{"ok":true}`, then analyze and download a short public video from the website.
 
-   | Variable | Value |
-   | --- | --- |
-   | `VIDEO_WORKER_URL` | The deployed Python worker's public HTTPS origin, e.g. `https://your-worker.example.com` |
-   | `VIDEO_WORKER_SECRET` | The same random secret configured on the Python worker; at least 24 characters |
+The public `/api/analyze` and `/api/download` routes run in Next.js and call the worker privately. Signed `/file/*` download links and `/preview/*` media are routed directly to the worker on the same domain. The worker's raw `/analyze` and `/download` POST endpoints are not publicly routed. `.vercelignore` includes worker source and Docker configuration while excluding local secrets, Python environments, caches, and generated videos.
 
-4. Click **Deploy**. If you add or change the variables later, redeploy so the new deployment uses them.
-5. Open the resulting `*.vercel.app` URL and check a public video link, then download one available quality.
+Worker preparation (including waiting for a free slot) times out after 240 seconds by default, leaving part of Vercel's default 300-second request budget for file transfer. The entire file response still has to finish within the project's configured function duration; long preparation or slow transfers can time out. On a plan with a longer duration, configure the worker's function duration in Vercel and optionally raise `VIDEO_DOWNLOAD_TIMEOUT_SECONDS` while leaving time for the transfer. Platform extraction can still fail when a video provider blocks datacenter IPs or restricts the video.
 
-The website can deploy before the worker is ready, but analyzing and downloading will not work until both environment variables point to a running worker. Do not use `localhost` for either production worker URL: Vercel and visitors cannot reach the worker on your computer through that address.
+Before unrestricted public traffic, configure an edge rate limit/bot challenge for `/api/analyze`, `/api/download`, and `/file/*`, and enforce temporary disk/network quotas. The worker limits concurrent operations to two per instance; signed links expire in 15 minutes and can be reused before expiry. Restrict worker network egress to public destinations, including blocking private, loopback, link-local, and cloud metadata addresses, because extractor redirects and media URLs also need protection.
 
-The Python worker is a separate deployment using `worker/Dockerfile`; importing the repository into Vercel deploys the Next.js application. Video bytes go directly from the worker to the visitor. `.vercelignore` excludes the local Python environment, generated videos, and local environment files from CLI uploads. Set production secrets in the hosting dashboards.
+### Local development or a separate worker host
 
-### Python worker and public traffic
+For local development, use `.env.example`: the website reads `VIDEO_WORKER_URL=http://localhost:8000`, and both processes need the same `VIDEO_WORKER_SECRET`. Relative file links returned by the worker are resolved to that worker origin by the Next.js API routes. Run the worker and Next.js as described above.
 
-1. Deploy `worker/` using its Dockerfile. Set `VIDEO_WORKER_SECRET` and `WORKER_PUBLIC_URL` (the worker's public HTTPS origin). The download URL must be reachable by visitors. Configure its reverse proxy for downloads that can take up to 10 minutes. Mount enough temporary disk and enforce disk/network quotas.
-2. Import this repository into Vercel. Set `VIDEO_WORKER_URL` to the worker's HTTPS origin and `VIDEO_WORKER_SECRET` to the shared secret. Deploy using the Next.js preset. These are server-only variables; do not prefix them with NEXT_PUBLIC.
-3. Before opening it to unrestricted public traffic, configure a durable edge rate limit/bot challenge on `/api/analyze` and `/api/download`, plus the worker's `/file/*` endpoint. The worker limits simultaneous operations to two per process; signed download links expire in 15 minutes but can be reused during that period. Multiple processes increase concurrency.
-4. Restrict worker network egress to public internet destinations, blocking private, loopback, link-local, and cloud metadata addresses. Input domains are allowlisted, but extractor redirects and media URLs still require network-level egress protection.
-
-Vercel handles only metadata and signed links. The worker sends video files directly to visitors, avoiding Vercel function payload limits. No video bytes pass through Vercel.
+If you choose a separate worker host, deploy `worker/` with its Dockerfile and set `VIDEO_WORKER_URL` and the shared secret on the website. You can optionally set `WORKER_PUBLIC_URL` on the worker to its public HTTPS origin. Visitors must be able to reach that origin. Do not use localhost for a separately hosted production worker.
 
 ## Behavior and limits
 
@@ -52,6 +45,8 @@ Vercel handles only metadata and signed links. The worker sends video files dire
 ## Checks
 
 `npm run typecheck` and `npm run build`. Python syntax: `python3 -m py_compile worker/main.py`.
+
+Service integration checks: `node --test tests/worker-forward.test.cjs` and `worker/.venv/bin/python -m unittest discover -s worker -p 'test_*.py' -v` (after installing worker dependencies in the virtual environment). These exercise internal forwarding, same-domain signed downloads, streamed file cleanup, authentication, and queue timeouts without contacting a video platform.
 
 ## Reconstructed MP4 for the supplied Pictory preview
 

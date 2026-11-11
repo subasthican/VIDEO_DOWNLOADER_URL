@@ -2,7 +2,9 @@ node_modules/
 .next/
 .git/
 .env*
-worker/
+worker/.venv/
+worker/__pycache__/
+worker/.env*
 output/
 *.tsbuildinfo
 __pycache__/
