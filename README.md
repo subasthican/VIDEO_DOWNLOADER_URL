@@ -39,6 +39,7 @@ If you choose a separate worker host, deploy `worker/` with its Dockerfile and s
 - Resolution options come from actual source formats. Original means best available source quality, not upscaling. FFmpeg merges separate audio/video streams without re-encoding. Container can be WebM/MKV when codecs require it.
 - Videos must be finished and under 30 minutes; downloaded files are limited to 500 MB. FFmpeg temporary inputs may occupy additional space, so enforce host disk quotas. An unavailable browser-compatible preview does not prevent download.
 - Form input and results live only in React memory. Refresh and history restoration clear them. The app creates no cookies, localStorage, sessionStorage, or saved history. It cannot reset source-platform cookies or erase server/provider access logs. Previously issued download links remain valid until expiry.
+- Vercel Web Analytics counts site visits and page views. Pasted video links and download selections are not sent as custom analytics events.
 - Temporary files are deleted after serving or failure. Abrupt container termination can leave files behind; configure host cleanup for stale `linkdrop-*` directories.
 - Downloads start via the browser after preparation. A download-time source failure appears in the worker response, rather than in the page. Large downloads take time and consume worker bandwidth.
 
