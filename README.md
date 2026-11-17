@@ -6,9 +6,21 @@ Next.js frontend and API routes, with a separate Python/yt-dlp worker for video 
 
 1. Install Node.js 20.9+ and Python 3.12+, FFmpeg, and a current JavaScript runtime supported by yt-dlp.
 2. `npm install`, then copy `.env.example` to `.env.local`. Set `VIDEO_WORKER_SECRET` to a random secret of at least 24 characters (e.g. `openssl rand -hex 32`).
-3. In a second terminal, create a virtual environment, install `worker/requirements.txt`, and export the **same** `VIDEO_WORKER_SECRET`.
-4. Start the worker: `uvicorn main:app --app-dir worker --port 8000`.
+3. In a second terminal, create the worker environment with `python3 -m venv worker/.venv`, then install dependencies with `worker/.venv/bin/python -m pip install -r worker/requirements.txt`.
+4. Start the worker: `npm run worker`. This loads `.env.local` (including the shared secret and limits) and puts the worker environment's yt-dlp on PATH. Keep this terminal running alongside Next.js; restart it after changing worker code or configuration.
 5. Run `npm run dev` and open http://localhost:3000.
+
+The example local configuration supports finished videos of 9 hours or longer:
+
+```dotenv
+VIDEO_MAX_DURATION_SECONDS=0
+VIDEO_MAX_FILESIZE_MB=0
+VIDEO_DOWNLOAD_TIMEOUT_SECONDS=86400
+```
+
+`0` disables the duration or file-size limit; the timeout allows up to 24 hours for preparation, including queue time. Keep the worker running and the computer awake until the download finishes. Large videos need enough temporary disk space for separate video/audio streams and the merged result. The browser receives the file after downloading and merging on the worker, so preparation can take a long time. Lower source resolutions usually need less disk space and time. Live and upcoming streams are still rejected. Source-platform restrictions can still prevent extraction.
+
+These settings apply to the local worker started with `npm run worker`. When running uvicorn directly, export the settings to that process yourself. Without overrides the worker retains limits of 30 minutes, 500 MB, and 240 seconds. Hosted function duration and disk limits still apply even if these application limits are disabled; long downloads need a worker host that permits long requests and sufficient disk space.
 
 ## Deploy to Vercel from `./`
 
@@ -37,7 +49,7 @@ If you choose a separate worker host, deploy `worker/` with its Dockerfile and s
 - Public YouTube, Instagram, X/Twitter, and Facebook video URLs use yt-dlp. Site support is best effort: public visibility does not guarantee extraction. Platforms may block datacenter IPs, require authentication, or change their APIs. No private content, user login cookies, or DRM bypass is implemented.
 - Pictory preview links display the original embedded preview. The supplied example is a scene-based project, not a finished MP4. Export in Pictory to obtain the original complete MP4. The page also offers Record preview: open the preview tab, share that tab with audio, play it, and stop to save a local WebM/MP4 recording. This captures visible playback, not the original file; quality depends on the display and browser. Chrome/Edge desktop with tab audio are recommended. Recordings are capped at 30 minutes / approximately 400 MB, and refresh cancels unsaved recordings. Stock clips inside a project are never presented as the finished download. Embedding may be refused by the source's frame policy.
 - Resolution options come from actual source formats. Original means best available source quality, not upscaling. FFmpeg merges separate audio/video streams without re-encoding. Container can be WebM/MKV when codecs require it.
-- Videos must be finished and under 30 minutes; downloaded files are limited to 500 MB. FFmpeg temporary inputs may occupy additional space, so enforce host disk quotas. An unavailable browser-compatible preview does not prevent download.
+- Videos must be finished. Duration and size limits are configurable through `VIDEO_MAX_DURATION_SECONDS` and `VIDEO_MAX_FILESIZE_MB`; defaults are 30 minutes and 500 MB, while the example local configuration disables both limits. FFmpeg temporary inputs may occupy additional space. An unavailable browser-compatible preview does not prevent download.
 - Form input and results live only in React memory. Refresh and history restoration clear them. The app creates no cookies, localStorage, sessionStorage, or saved history. It cannot reset source-platform cookies or erase server/provider access logs. Previously issued download links remain valid until expiry.
 - Vercel Web Analytics counts site visits and page views. Pasted video links and download selections are not sent as custom analytics events.
 - Temporary files are deleted after serving or failure. Abrupt container termination can leave files behind; configure host cleanup for stale `linkdrop-*` directories.

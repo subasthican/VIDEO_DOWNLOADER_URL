@@ -62,6 +62,70 @@ class WorkerFlowTests(unittest.IsolatedAsyncioTestCase):
             json={'url': 'https://www.youtube.com/watch?v=example'})
         self.assertEqual(response.status_code, 401)
 
+    async def test_unlimited_duration_accepts_nine_hours_and_longer(self):
+        for duration in (34019, 90000):
+            with self.subTest(duration=duration), patch.object(worker, 'MAX_DURATION', 0), \
+                 patch.object(worker, 'run', return_value=json.dumps({
+                     'title': 'Long video', 'duration': duration, 'is_live': False,
+                     'formats': [{'height': 720, 'vcodec': 'h264'}],
+                 }).encode()):
+                response = await self.client.post('/analyze', headers=self.headers,
+                    json={'url': 'https://youtu.be/7iCczf3fHWY'})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()['duration'], duration)
+                self.assertIn('720', [f['id'] for f in response.json()['formats']])
+
+    async def test_configured_duration_limit_is_still_enforced(self):
+        with patch.object(worker, 'MAX_DURATION', 1800), \
+             patch.object(worker, 'run', return_value=b'{"duration":34019}'):
+            response = await self.client.post('/analyze', headers=self.headers,
+                json={'url': 'https://youtu.be/7iCczf3fHWY'})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn('30-minute', response.json()['detail'])
+
+    async def test_unlimited_duration_still_rejects_live_and_upcoming_videos(self):
+        for metadata in ({'is_live': True}, {'live_status': 'is_upcoming'}):
+            with self.subTest(metadata=metadata), patch.object(worker, 'MAX_DURATION', 0), \
+                 patch.object(worker, 'run', return_value=json.dumps(metadata).encode()):
+                response = await self.client.post('/analyze', headers=self.headers,
+                    json={'url': 'https://youtu.be/7iCczf3fHWY'})
+                self.assertEqual(response.status_code, 422)
+                self.assertIn('finished video', response.json()['detail'])
+
+    async def test_large_file_limits_and_timeout_are_configurable(self):
+        # Sparse files exercise the old 500 MB boundary without allocating or streaming it.
+        ticket = worker.sign({'url': 'https://youtu.be/7iCczf3fHWY',
+                              'quality': '720', 'kind': 'file'})
+        for limit, expected_status in ((0, 200), (500, 413)):
+            folders = []
+
+            async def extractor(args, timeout=45):
+                self.assertEqual(timeout, 86400)
+                if limit:
+                    self.assertEqual(args[args.index('--max-filesize') + 1], '500M')
+                else:
+                    self.assertNotIn('--max-filesize', args)
+                output = Path(args[args.index('--output') + 1].replace('%(ext)s', 'mp4'))
+                folders.append(output.parent)
+                with output.open('wb') as video:
+                    video.truncate(501 * 1024 * 1024)
+                return b''
+
+            with self.subTest(limit=limit), patch.object(worker, 'MAX_FILESIZE_MB', limit), \
+                 patch.object(worker, 'DOWNLOAD_TIMEOUT', 86400), \
+                 patch.object(worker, 'run', side_effect=extractor):
+                if expected_status == 200:
+                    response = await worker.file(ticket)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.path.stat().st_size, 501 * 1024 * 1024)
+                    await response.background()
+                else:
+                    with self.assertRaises(worker.HTTPException) as error:
+                        await worker.file(ticket)
+                    self.assertEqual(error.exception.status_code, expected_status)
+            self.assertTrue(folders)
+            self.assertTrue(all(not folder.exists() for folder in folders))
+
     async def test_tampered_file_ticket_is_rejected(self):
         response = await self.client.get('/file/not-a-valid-ticket')
         self.assertEqual(response.status_code, 410)

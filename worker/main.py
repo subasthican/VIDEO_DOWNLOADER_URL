@@ -10,8 +10,12 @@ from starlette.background import BackgroundTask
 SECRET = os.environ.get('VIDEO_WORKER_SECRET', '')
 PUBLIC = os.environ.get('WORKER_PUBLIC_URL', '').rstrip('/')
 DOWNLOAD_TIMEOUT = int(os.environ.get('VIDEO_DOWNLOAD_TIMEOUT_SECONDS', '240'))
+MAX_DURATION = int(os.environ.get('VIDEO_MAX_DURATION_SECONDS', '1800'))
+MAX_FILESIZE_MB = int(os.environ.get('VIDEO_MAX_FILESIZE_MB', '500'))
 if DOWNLOAD_TIMEOUT <= 0:
     raise RuntimeError('VIDEO_DOWNLOAD_TIMEOUT_SECONDS must be positive')
+if MAX_DURATION < 0 or MAX_FILESIZE_MB < 0:
+    raise RuntimeError('Video duration and file-size limits must be nonnegative; use 0 for no limit')
 if len(SECRET) < 24:
     raise RuntimeError('Set VIDEO_WORKER_SECRET to at least 24 random characters')
 app = FastAPI(docs_url=None, redoc_url=None)
@@ -55,12 +59,12 @@ def unsign(token):
         raise HTTPException(410,'This link expired. Check the video again.')
 
 async def run(args, timeout=45):
-    process=await asyncio.create_subprocess_exec('yt-dlp','--ignore-config','--js-runtimes','node','--no-playlist','--no-warnings','--socket-timeout','15','--retries','1',*args,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
+    process=await asyncio.create_subprocess_exec('yt-dlp','--ignore-config','--js-runtimes','node','--no-playlist','--no-warnings','--no-progress','--socket-timeout','15','--retries','1',*args,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
     try:
         out,err=await asyncio.wait_for(process.communicate(),timeout)
     except (asyncio.TimeoutError,asyncio.CancelledError):
         process.kill(); await process.wait()
-        raise HTTPException(504,'The source took too long. Try a shorter video or try again later.')
+        raise HTTPException(504,'Video preparation took too long. Please try again.')
     if process.returncode:
         detail=err.decode(errors='replace')
         logging.getLogger('linkdrop.extractor').warning('yt-dlp exited %s: %s', process.returncode, re.sub(r'https?://\S+', '[url]', detail)[-2000:])
@@ -86,8 +90,10 @@ async def analyze(body:Analyze, authorization:str|None=Header(default=None)):
         info=json.loads(await run(['--dump-single-json','--skip-download','--',body.url]))
     if info.get('_type') in ('playlist','multi_video'):
         raise HTTPException(422,'Paste a link to one video rather than a collection.')
-    if info.get('is_live') or (info.get('duration') or 0)>1800:
-        raise HTTPException(422,'Use a finished video shorter than 30 minutes.')
+    if info.get('is_live') or info.get('live_status') in ('is_live', 'is_upcoming'):
+        raise HTTPException(422,'Use a finished video. Live and upcoming streams cannot be downloaded.')
+    if MAX_DURATION and (info.get('duration') or 0)>MAX_DURATION:
+        raise HTTPException(422,f'This video exceeds the configured {MAX_DURATION / 60:g}-minute duration limit.')
     formats=[f for f in info.get('formats',[]) if f.get('vcodec') not in (None,'none') and not f.get('has_drm')]
     if not formats: raise HTTPException(422,'No downloadable video formats were found.')
     heights=sorted({int(f['height']) for f in formats if f.get('height')},reverse=True)
@@ -117,18 +123,20 @@ async def file(ticket:str):
     selector='bv*+ba/b' if quality=='original' else f'bv*[height<={int(quality)}]+ba/b[height<={int(quality)}]'
     folder=tempfile.mkdtemp(prefix='linkdrop-')
     try:
-        # Include time waiting for a slot, leaving time to send the file within Vercel's request limit.
+        # Include time waiting for a slot. Hosted workers must also allow time for file transfer.
         async with asyncio.timeout(DOWNLOAD_TIMEOUT):
             async with slots:
-                await run(['--max-filesize','500M','--format',selector,'--merge-output-format','mp4','--output',folder+'/video.%(ext)s','--',data['url']],timeout=DOWNLOAD_TIMEOUT)
+                size_args=['--max-filesize',f'{MAX_FILESIZE_MB}M'] if MAX_FILESIZE_MB else []
+                await run([*size_args,'--format',selector,'--merge-output-format','mp4','--output',folder+'/video.%(ext)s','--',data['url']],timeout=DOWNLOAD_TIMEOUT)
         files=[p for p in Path(folder).iterdir() if p.suffix in ('.mp4','.webm','.mkv','.mov')]
-        if not files: raise HTTPException(422,'The source did not provide a downloadable file within the 500 MB limit.')
+        if not files: raise HTTPException(422,'The source did not provide a completed downloadable file.')
         result=files[0]
-        if result.stat().st_size>500*1024*1024: raise HTTPException(413,'The video exceeds the 500 MB download limit.')
+        if MAX_FILESIZE_MB and result.stat().st_size>MAX_FILESIZE_MB*1024*1024:
+            raise HTTPException(413,f'The video exceeds the configured {MAX_FILESIZE_MB} MB download limit.')
         return FileResponse(result,filename='video'+result.suffix,background=BackgroundTask(shutil.rmtree,folder),headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
     except TimeoutError:
         shutil.rmtree(folder,ignore_errors=True)
-        raise HTTPException(504,'The download service is busy. Try a shorter video or try again later.')
+        raise HTTPException(504,'The download service is busy or video preparation took too long. Please try again.')
     except BaseException:
         shutil.rmtree(folder,ignore_errors=True);raise
 
